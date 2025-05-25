@@ -1,4 +1,4 @@
-# Scoreboard Application Deployment to Google Cloud Run
+# Hackathon Scoreboard to Google Cloud Run
 
 
 This document outlines the steps to deploy the frontend and backend services of the Scoreboard application to Google Cloud Run.
