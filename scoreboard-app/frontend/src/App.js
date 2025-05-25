@@ -8,8 +8,8 @@ import SetupPage from './components/SetupPage';
 import PasswordPrompt from './components/PasswordPrompt'; // Import PasswordPrompt
 
 // Use environment variable for backend URL, with a fallback for local development
-//const BACKEND_URL = 'http://localhost:8080';
-const BACKEND_URL = 'https://scoreboard-backend-service-712033249112.us-central1.run.app';
+const BACKEND_URL = 'http://localhost:8080';
+//const BACKEND_URL = 'YOUR BACKEND URL';
 
 const SCOREBOARD_URL = `${BACKEND_URL}/api/scoreboard`;
 const PARTICIPANT_URL =  `${BACKEND_URL}/api/participant`;
