@@ -1,0 +1,8 @@
+.App {
+  text-align: center;
+}
+
+main {
+  /* Ensures that the main content area is clear of the fixed header if you choose to make it fixed */
+  /* padding-top: 70px; */ /* Adjust if header becomes fixed */
+}
