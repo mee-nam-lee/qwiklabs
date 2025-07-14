@@ -8,6 +8,7 @@ import SetupPage from './components/SetupPage';
 import PasswordPrompt from './components/PasswordPrompt'; // Import PasswordPrompt
 
 // Use environment variable for backend URL, with a fallback for local development
+//const BACKEND_URL = 'http://localhost:8080';
 const BACKEND_URL = 'http://localhost:8080';
 //const BACKEND_URL = 'YOUR BACKEND URL';
 
@@ -86,7 +87,7 @@ function App() {
       // Start refreshing
       setIsAutoRefreshing(true);
       performRefreshCycle(); // Perform an immediate refresh cycle
-      const intervalId = setInterval(performRefreshCycle, 60000); // 60 seconds
+      const intervalId = setInterval(performRefreshCycle, 120000); // 120 seconds
       setAutoRefreshIntervalId(intervalId);
       console.log("Auto-refresh started with interval ID:", intervalId);
     }
