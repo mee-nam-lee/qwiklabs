@@ -2,12 +2,17 @@ import os
 import sqlite3
 from datetime import datetime, timezone, timedelta
 from flask import Flask, jsonify, request
-from flask_cors import CORS
 from google.cloud import storage
 
 app = Flask(__name__)
 #app.debug = True
-CORS(app)  # Enable CORS for all routes
+
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods', '*')
+    return response
 
 # Path to the SQLite database file
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -35,6 +40,14 @@ def init_db():
             UNIQUE(participant, project)
         )
     ''')
+    cursor.execute('DROP TABLE IF EXISTS processed_blobs')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS processed_blobs (
+            participant_id INTEGER NOT NULL,
+            blob_name TEXT NOT NULL,
+            PRIMARY KEY (participant_id, blob_name)
+        )
+    ''')
     conn.commit()
     conn.close()
 
@@ -45,76 +58,84 @@ def update_ranks():
     cursor = conn.cursor()
 
     # First, fetch all participants to update their scores from GCS
-    cursor.execute("SELECT id, project FROM participants")
+    cursor.execute("SELECT id, project, score FROM participants")
     all_participants = cursor.fetchall()
+
+    # Get all already processed blob names to avoid re-processing
+    cursor.execute("SELECT participant_id, blob_name FROM processed_blobs")
+    processed_blobs = {(row['participant_id'], row['blob_name']) for row in cursor.fetchall()}
     
     storage_client = storage.Client.create_anonymous_client() # For public buckets
 
     for participant_data in all_participants:
-        participant_db_id = participant_data['id'] # Use the database ID for score path
+        participant_db_id = participant_data['id']
         project_name = participant_data['project']
-        # participant_name = participant_data['participant'] # For logging, if needed
+        current_participant_score = participant_data['score']
 
-        # Determine the score path prefix based on the participant's database ID
-        #score_folder_prefix = f"score_{participant_db_id}/"
         score_folder_prefix = "score/"
-
-        bucket_name = f"{project_name}-bucket" # Bucket name remains the same
+        #score_folder_prefix = f"score_{participant_db_id - 16}/"
+        bucket_name = f"{project_name}-bucket"
         
-        new_score = 0
+        newly_processed_blobs = []
+        latest_datetime_str_from_file = ""
+        score_to_add = 0
+
         try:
             bucket = storage_client.bucket(bucket_name)
-            # Use the new score_folder_prefix
             print(f"Fetching scores for {participant_db_id} (project: {project_name}) from bucket '{bucket_name}', prefix '{score_folder_prefix}'")
-            blobs = bucket.list_blobs(prefix=score_folder_prefix) # Files in the 'score_X/' folder
-
-            current_participant_score = 0
-            latest_datetime_str_from_file = ""
+            blobs = bucket.list_blobs(prefix=score_folder_prefix)
 
             for blob in blobs:
-                # Ensure it's a .csv file and not the folder prefix itself
                 if blob.name.endswith('.csv') and blob.name != score_folder_prefix:
+                    if (participant_db_id, blob.name) in processed_blobs:
+                        print(f"{blob.name} is in the DB, skipping.")
+                        continue
+
                     try:
                         file_content = blob.download_as_text().strip()
-                        if not file_content: # Skip empty files
-                            print(f"Warning: File {blob.name} in bucket {bucket_name} for prefix {score_folder_prefix} is empty.")
+                        if not file_content:
+                            print(f"Warning: File {blob.name} is empty.")
                             continue
 
                         parts = file_content.split(',')
                         if len(parts) == 2:
                             score_str, datetime_str = parts[0].strip(), parts[1].strip()
-                            current_participant_score += int(score_str)
+                            score_to_add += int(score_str)
                             
-                            # Lexicographical comparison works for ISO 8601 format YYYY-MM-DDTHH:MM:SS+ZZ:ZZ
                             if not latest_datetime_str_from_file or datetime_str > latest_datetime_str_from_file:
                                 latest_datetime_str_from_file = datetime_str
+                            
+                            newly_processed_blobs.append(blob.name)
                         else:
-                            print(f"Warning: Could not parse content of {blob.name} in bucket {bucket_name} for prefix {score_folder_prefix}. Expected 'score,datetime', got '{file_content}'")
-                    except ValueError as ve: # For int conversion
-                        print(f"Warning: Could not convert score part of {blob.name} in bucket {bucket_name} for prefix {score_folder_prefix}. Content: '{file_content}'. Error: {ve}")
+                            print(f"Warning: Could not parse content of {blob.name}. Expected 'score,datetime', got '{file_content}'")
+                    except ValueError as ve:
+                        print(f"Warning: Could not convert score part of {blob.name}. Content: '{file_content}'. Error: {ve}")
                     except Exception as e:
-                        print(f"Error processing file {blob.name} from bucket {bucket_name} for prefix {score_folder_prefix}: {e}")
+                        print(f"Error processing file {blob.name}: {e}")
             
-            # Determine the lastUpdated time for the database
-            log_message_suffix = ""
-            if latest_datetime_str_from_file:
-                update_time_for_db = latest_datetime_str_from_file
-                log_message_suffix = "(from file)"
-            else:
-                # Fallback to current KST time in the desired format if no valid datetime found in files
-                korea_offset = timezone(timedelta(hours=9))
-                update_time_for_db = datetime.now(korea_offset).strftime("%Y-%m-%dT%H:%M:%S%:z")
-                log_message_suffix = f"(no valid datetime in files, used current KST: {update_time_for_db})"
+            if newly_processed_blobs:
+                log_message_suffix = ""
+                if latest_datetime_str_from_file:
+                    update_time_for_db = latest_datetime_str_from_file
+                    log_message_suffix = "(from file)"
+                else:
+                    korea_offset = timezone(timedelta(hours=9))
+                    update_time_for_db = datetime.now(korea_offset).strftime("%Y-%m-%dT%H:%M:%S%:z")
+                    log_message_suffix = f"(no valid datetime in files, used current KST: {update_time_for_db})"
 
-            cursor.execute("UPDATE participants SET score = ?, lastUpdated = ? WHERE id = ?", 
-                           (current_participant_score, update_time_for_db, participant_db_id))
-            print(f"Updated score for participant ID {participant_db_id} (project: {project_name}) to {current_participant_score}. lastUpdated to {update_time_for_db} {log_message_suffix}")
+                final_score = current_participant_score + score_to_add
+                cursor.execute("UPDATE participants SET score = ?, lastUpdated = ? WHERE id = ?", 
+                               (final_score, update_time_for_db, participant_db_id))
+                
+                # Add newly processed blobs to the tracking table
+                for blob_name in newly_processed_blobs:
+                    cursor.execute("INSERT INTO processed_blobs (participant_id, blob_name) VALUES (?, ?)", 
+                                   (participant_db_id, blob_name))
+                
+                print(f"Updated score for participant ID {participant_db_id} to {final_score}. lastUpdated to {update_time_for_db} {log_message_suffix}")
 
         except Exception as e:
-            # Updated print statement
-            print(f"Error accessing bucket {bucket_name} or its contents for prefix {score_folder_prefix} (participant ID {participant_db_id}, project: {project_name}): {e}")
-            # Optionally, decide if you want to skip this participant or handle the error differently
-            # For now, their score will remain unchanged if the bucket/files can't be accessed.
+            print(f"Error accessing bucket {bucket_name} or its contents for prefix {score_folder_prefix} (participant ID {participant_db_id}): {e}")
 
     conn.commit() # Commit score updates
 
@@ -168,8 +189,8 @@ def get_all_participants():
 def add_participant():
     """Endpoint to add a new participant."""
     data = request.get_json()
-    participant_name = data.get('participant')
-    project_id = data.get('project')
+    participant_name = (data.get('participant')).strip()
+    project_id = (data.get('project')).strip()
     # score = data.get('score', 0) # Allow score to be passed, default to 0
 
     print(f"Received data: {data}")
@@ -229,6 +250,9 @@ def delete_participant_by_id(participant_id):
     """Endpoint to delete a participant by their ID."""
     conn = get_db_connection()
     cursor = conn.cursor()
+
+    # Also delete their records from the processed_blobs table
+    cursor.execute("DELETE FROM processed_blobs WHERE participant_id = ?", (participant_id,))
     cursor.execute("DELETE FROM participants WHERE id = ?", (participant_id,))
     conn.commit()
     
